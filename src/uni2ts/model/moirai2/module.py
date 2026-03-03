@@ -157,8 +157,10 @@ class Moirai2Module(
             time_id=time_id,
             var_id=variate_id,
         )
-        preds = self.out_proj(reprs)
-        if training_mode:
-            return preds, scaled_target
-        else:
-            return preds * scale + loc
+        
+        return reprs
+        # preds = self.out_proj(reprs)
+        # if training_mode:
+        #     return preds, scaled_target
+        # else:
+        #     return preds * scale + loc
