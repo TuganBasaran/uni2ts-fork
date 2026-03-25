@@ -44,7 +44,7 @@ class EmbeddingGenerator:
         0 -> Rolling Forecast / Expanding Window
         1 -> Sliding Window
         """
-                
+
         dates = self.df.index
         self.embedding_dict = {}
 
@@ -63,7 +63,6 @@ class EmbeddingGenerator:
 
         if technique == "Sliding Window":
             for col_idx, column in enumerate(self.columns):
-    
                 values = self.data_dict[column]
                 variate_id = torch.full(
                     [self.batch_size, self.seq_len], col_idx, dtype=torch.long
@@ -71,7 +70,7 @@ class EmbeddingGenerator:
 
                 for i in range(len(values) - self.context_length + 1):
                     date = dates[i + self.context_length - 1]
-                    
+
                     target_np = values[i : i + self.context_length]
                     target_tensor = torch.tensor(target_np, dtype=torch.float32).to(
                         self.device
@@ -93,18 +92,13 @@ class EmbeddingGenerator:
                             training_mode=training_mode,
                         )
 
-                        # Embedding Pooling Yapılmalı mı? Hocaya sor -> mean pooling? Son index'ini al??? 
-                        # Şu anlık pooling yok full embedding kullanılarak 
+                        # Embedding Pooling Yapılmalı mı? Hocaya sor -> mean pooling? Son index'ini al???
+                        # Şu anlık pooling yok full embedding kullanılarak
                         embedding = embedding.squeeze(0).cpu().numpy()
-                        
-                        
+
                         if date not in (self.embedding_dict):
                             self.embedding_dict[date] = {}
-                            
-                        self.embedding_dict[date][column] = embedding
-                        
-                        
-                    
 
+                        self.embedding_dict[date][column] = embedding
 
             return self.embedding_dict
