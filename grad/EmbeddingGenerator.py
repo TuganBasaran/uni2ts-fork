@@ -25,7 +25,8 @@ class EmbeddingGenerator:
     def set_data(self):
         self.df = pd.read_csv(self.data_path, index_col="date")
 
-        self.columns = self.df.columns
+        self.columns = self.df.columns.values[0:10]
+        print(f"Length of columns: {len(self.columns)}")
 
         self.data_dict = {}
 

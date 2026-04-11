@@ -1,23 +1,22 @@
 import torch
-import torch.nn as t_nn
-import torch_geometric.nn as nn # type: ignore
+import torch.nn.functional as F
+import torch.nn as nn
+import torch_geometric.nn as pyg_nn
 
 
 class GraphModule(nn.Module): 
-    def __init__(self, input_dim, hidden_dim, device= "cpu"): 
+    def __init__(self, input_dim: int, hidden_dim: int, device="cpu"): 
         super().__init__()
         
-        self.dtype = torch.float32 if device == "mps" else torch.long
-
         # GCN neden kullandım? 
         # Her inference'da farklı bir graph yapısı verdiğim için static yapısından etkilenmiyorum 
-        self.conv_1 = nn.GCNConv(input_dim, hidden_dim, dtype= self.dtype)
-        self.conv_2 = nn.GCNConv(hidden_dim, input_dim, dtype= self.dtype)
-        self.norm = nn.LayerNorm(input_dim, dtype= self.dtype)
+        self.conv_1 = pyg_nn.GCNConv(input_dim, hidden_dim)
+        self.conv_2 = pyg_nn.GCNConv(hidden_dim, input_dim)
+        self.norm = nn.LayerNorm(input_dim) # Graph Norm? 
         
-    def forward(self, x, edge_index, edge_weight): 
+    def forward(self, x, edge_index, edge_weight=None): 
         x = self.conv_1(x, edge_index, edge_weight)
-        x = t_nn.ReLU(x)
+        x = F.relu(x)
         x = self.conv_2(x, edge_index, edge_weight)
         x = self.norm(x)
         

@@ -3,16 +3,15 @@ from torch import nn
 
 class Adapter(nn.Module): 
     def __init__(self, embedding_dim, hidden_dim, device= "cpu"): 
-        super.__init__()
+        super().__init__()
         
-        self.dtype = torch.float32 if device == "cpu" else torch.long
+        self.dtype = torch.float32
         
         
         self.seq = nn.Sequential(
             nn.Linear(embedding_dim * 2, hidden_dim, dtype= self.dtype), 
-            nn.ReLU(), # Gausian Relu -> GELU?? 
+            nn.GELU(), # Gausian Relu -> GELU?? # Previous version = ReLU
             nn.Linear(hidden_dim, embedding_dim, dtype= self.dtype),
-            nn.ReLU() # Buradaki activation layer'a ihtiyaç var mı? 
         )
         
         
