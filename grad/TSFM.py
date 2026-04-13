@@ -16,7 +16,7 @@ class TSFM(nn.Module):
         corr_period=30,
         threshold=0.3,
         device="cpu",
-        forecast_horizon= 1
+        forecast_horizon=1,
     ):
 
         super().__init__()
@@ -28,20 +28,20 @@ class TSFM(nn.Module):
         self.context_length = context_length
         self.patch_len = patch_len
         self.seq_len = context_length // patch_len
-        self.forecast_horizon= forecast_horizon
+        self.forecast_horizon = forecast_horizon
 
         if device == "cuda" and torch.cuda.is_available():
             self.device = "cuda"
-            torch.set_default_dtype(torch.float32)
+            torch.set_default_dtype(torch.long)
         elif device == "mps" and torch.backends.mps.is_available():
             self.device == "mps"
             torch.set_default_dtype(torch.float32)
         else:
             self.device = "cpu"
-            torch.set_default_dtype(torch.float32)
+            torch.set_default_dtype(torch.long)
 
         # Bunları parametre olarak vermeyi tercih ettim. Generalization bakış açısından bakarak bunu yapıyorum
-        # İleriki zamana göre bu kısmı aktif etmek gerekebilir. 
+        # İleriki zamana göre bu kısmı aktif etmek gerekebilir.
         # ------------------------------------------------
 
         # self.embedding_generator = EmbeddingGenerator(
@@ -59,24 +59,23 @@ class TSFM(nn.Module):
             data_path=self.data_path,
             index_col=self.index_col,
             corr_period=self.corr_period,
-            device=self.device,
         )
 
         flat_dim = self.seq_len * 384
 
         self.graph_module = GraphModule(
-            input_dim=flat_dim, hidden_dim=128, device=self.device
-        )
+            input_dim=flat_dim, hidden_dim=128
+        ).to(self.device)
 
         self.adapter = Adapter(
-            embedding_dim=flat_dim, hidden_dim=128, device=self.device
-        )
+            embedding_dim=flat_dim, hidden_dim=128
+        ).to(self.device)
 
         self.PredictionHead = PredictionHead(
             input_dim=flat_dim,
             hidden_dim=128,
             forecast_horizon=self.forecast_horizon,
-        )
+        ).to(self.device)
 
         self.graph_dict = self.spatio_graph.get_pyg_edges(threshold=threshold)
 
