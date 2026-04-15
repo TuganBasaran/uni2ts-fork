@@ -3,6 +3,7 @@ import numpy as np  # type: ignore
 import pandas as pd  # type: ignore
 import torch  # type: ignore
 from uni2ts.model.moirai2 import Moirai2Module  # type: ignore
+from tqdm import tqdm # type: ignore
 
 
 class EmbeddingGenerator:
@@ -64,16 +65,17 @@ class EmbeddingGenerator:
 
         if technique == "Sliding Window":
             for col_idx, column in enumerate(self.columns):
+                print(f"The column -{column}- is generating")
                 values = self.data_dict[column]
                 variate_id = torch.full(
                     [self.batch_size, self.seq_len], col_idx, dtype=torch.long
                 ).to(self.device)
 
-                for i in range(len(values) - self.context_length + 1):
+                for i in tqdm(range(len(values) - self.context_length + 1)):
                     date = dates[i + self.context_length - 1]
 
                     target_np = values[i : i + self.context_length]
-                    target_tensor = torch.tensor(target_np, dtype=torch.float32).to(
+                    target_tensor = torch.tensor(target_np, dtype=torch.long).to(
                         self.device
                     )
                     target_tensor = target_tensor.reshape(

@@ -2,16 +2,17 @@ import os
 import sys
 
 import numpy as np
-import pandas as pd # type: ignore
+import pandas as pd  # type: ignore
 import torch
 import torch.nn as nn
-from torch_geometric.data import Data # type: ignore
-from torch_geometric.loader import DataLoader # type: ignore
+from torch_geometric.data import Data  # type: ignore
+from torch_geometric.loader import DataLoader  # type: ignore
 
 # Add the 'grad' directory to the python path so it can find TSFM.py
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from TSFM import TSFM # type: ignore
+from sklearn.preprocessing import StandardScaler
+from TSFM import TSFM  # type: ignore
 
 
 class TSFMTrainer:
@@ -21,175 +22,220 @@ class TSFMTrainer:
 
     def prepare_data(
         self,
-        embedding_dict: dict,
-        data_path: str,
-        context_length: int,
-        patch_len: int,
-        target_col="CO1 Comdty",
+        data_path,
+        embedding_dict,
+        patch_len=None,
+        target_column="CO1 Comdty",
         index_col="date",
-        corr_period=30,
-        threshold=0.3,
-        forecast_horizon=1,
-        train_test_split=0.8,
+        train_size=0.8,
+        val_size=0.1,
+        test_size=0.1,
         batch_size=32,
     ):
-
-        # TSFM modelini parametrelerle initialize ediyoruz
-        self.model = TSFM(
-            data_path=data_path,
-            context_length=context_length,
-            patch_len=patch_len,
-            index_col=index_col,
-            corr_period=corr_period,
-            threshold=threshold,
-            device=self.device,
-            forecast_horizon=forecast_horizon,
-        )
-        self.model.to(self.device)
-
-        self.embedding_dict = embedding_dict
-        self.embedding_df = pd.DataFrame.from_dict(embedding_dict, orient="index")
         self.data_path = data_path
-        self.target_col = target_col
-        self.index_col = index_col
-        # Read true values
-        full_df = pd.read_csv(self.data_path, index_col=self.index_col)
-        self.batch_size = batch_size
-        self.train_test_split = train_test_split
+        self.df = pd.read_csv(data_path, index_col=index_col)
 
-        # Sadece embedding_dict içindeki "date" indekslerine karşılık gelen ancak gerçek veride var olanları çekiyoruz.
-        valid_index = self.embedding_df.index.intersection(full_df.index)
-        self.embedding_df = self.embedding_df.loc[valid_index]
-        self.true_df = full_df.loc[valid_index, target_col]
+        self.target_column = target_column
+        self.embedding_dict = embedding_dict
+        self.dict_keys_list = list(self.embedding_dict.keys())
+        self.embedding_shape = self.embedding_dict[self.dict_keys_list[0]]
 
-        # Forecast horizon = 1: Bugünün embeddingleri ile yarının hedefini eşleştirmek için bir geri al:
-        self.true_df = self.true_df.shift(-1).dropna()
+        if patch_len is None:
+            self.patch_len = 32
+        else:
+            self.patch_len = self.embedding_shape[
+                0
+            ]  # (patch_len, sequence_len) -> (patch_len)
 
-        valid_dates = self.true_df.index
+        self.model = TSFM(
+            data_path=self.data_path,
+            context_length=512,
+            patch_len=self.patch_len,
+            index_col="date",
+            corr_period=30,
+            threshold=0.3,
+            device=self.device,
+            forecast_horizon=1,
+        )
 
-        # Sütun sırasını belirleyelim (node sırası). İlk tarihteki embedding dictionary key'lerini referans al.
-        first_date = valid_dates[0]
-        col_order = list(self.embedding_dict[first_date].keys())
-        target_node_idx = col_order.index(target_col)
+        self.corr_dict = self.model.graph_dict
 
-        data_list = [] #type: ignore
+        self.corr_dates = np.array(list(self.corr_dict.keys()))
+        self.dict_dates = np.array(list(self.embedding_dict.keys()))
+        self.shifted_df = self.df.shift(-1).dropna().copy()
+        self.returns_df = ((self.shifted_df - self.df) / self.df).dropna().copy()
+        self.shifted_dates = np.array(list(self.shifted_df.index))
 
-        for date in valid_dates:
-            if date not in self.model.graph_dict:
-                continue  # Korelasyon olmayan ilk günleri atla
+        self.valid_dates = np.intersect1d(self.corr_dates, self.dict_dates)
+        self.valid_dates = np.intersect1d(self.valid_dates, self.shifted_dates)
 
-            embeddings_for_date = []
+        self.valid_df = self.df.loc[self.valid_dates]
 
-            # Düğümleri her zaman aynı sırada tensor'a dönüştür.
-            for col in col_order:
-                emb = self.embedding_dict[date][col]
-                embeddings_for_date.append(emb)
+        data_list = []
 
-            # Beklenen Node Shape: (num_nodes, seq_len, 384) -> Flatten(num_nodes, seq_len * 384) PyG için
-            e_stacked = np.stack(embeddings_for_date, axis=0)
-            e_stacked_flat = e_stacked.reshape(e_stacked.shape[0], -1)
+        print(f"Preparing dataloaders with target column {self.target_column}")
 
-            # TSFM modelindeki boyuta uyum kontrolü
-            if len(data_list) == 0:
-                assert e_stacked.shape[1] == self.model.seq_len, (
-                    f"Embedding seq_len {e_stacked.shape[1]} doesn't match model seq_len {self.model.seq_len}"
-                )
-                assert e_stacked.shape[2] == 384, (
-                    f"Embedding dim {e_stacked.shape[2]} must be 384"
-                )
+        # Calculate the node index of target column
+        col_order = self.df.columns.tolist()
+        target_node_idx = col_order.index(self.target_column)
 
-            x_tensor = torch.tensor(e_stacked_flat, dtype=torch.float32)
-            y_tensor = torch.tensor([self.true_df.loc[date]], dtype=torch.float32)
+        total_length = len(self.valid_dates)
+        train_len = int(total_length * train_size)
 
-            edge_index = self.model.graph_dict[date]["edge_index"]
-            edge_weight = self.model.graph_dict[date]["edge_weight"]
+        # Fit scaler ONLY on the training portion to prevent data leakage
+        train_dates = self.valid_dates[:train_len]
+        # Target is now the percentage RETURN, not the absolute price!
+        train_y_returns = self.returns_df.loc[
+            train_dates, self.target_column
+        ].values.reshape(-1, 1)
+        self.target_scaler = StandardScaler()
+        self.target_scaler.fit(train_y_returns)
 
-            # Create PyTorch Geometric Data object
+        for date in self.valid_dates:
+            e_i = self.embedding_dict[date][self.target_column]
+            # Flatten e_i to 1D so PyG batches it correctly as [batch_size, flat_dim]
+            e_i = torch.tensor(e_i, dtype=torch.float32).flatten().unsqueeze(0)
+
+            node_feature = self.corr_dict[date]["node_features"]
+            edge_index = self.corr_dict[date]["edge_index"]
+            edge_weight = self.corr_dict[date]["edge_weight"]
+
+            # Scale Returns!
+            y_return_raw = self.returns_df.loc[date, self.target_column]
+            y_scaled = self.target_scaler.transform([[y_return_raw]])[0][0]
+            y = torch.tensor(y_scaled, dtype=torch.float32)
+
+            # Keep track of the current day price (t) to reconstruct predictions at evaluation
+            price_t = self.df.loc[date, self.target_column]
+            price_t_tensor = torch.tensor(price_t, dtype=torch.float32)
+
             data = Data(
-                x=x_tensor,
+                x=node_feature,
                 edge_index=edge_index,
                 edge_attr=edge_weight,
-                y=y_tensor,
+                e_i=e_i,
+                y=y,
+                price_t=price_t_tensor,
                 target_idx=torch.tensor([target_node_idx], dtype=torch.long),
             )
-            data.num_nodes_custom = len(col_order)
+
             data_list.append(data)
 
-        total_size = len(data_list)
-        if total_size == 0:
-            raise ValueError(
-                "No valid graphs could be parsed! (Check your correlation period and data size)"
+        total_length = len(data_list)
+        # 1. Uzunlukların (index sınırlarının) hesaplanması
+        train_len = int(total_length * train_size)
+        test_len = int(total_length * test_size)
+        val_len = (
+            total_length - train_len - test_len
+        )  # DÜZELTME: train_size değil, train_len
+
+        self.train_dataloader = None
+        self.val_dataloader = None
+        self.test_dataloader = None
+
+        # 2. Hata Kontrolleri ve DataLoaders
+        if train_len <= 0 or test_len <= 0:
+            raise Exception(
+                "The train size or test size is less or equal to 0. Fix your train and test percentages!"
             )
 
-        train_size = int(total_size * 0.8)
-        val_size = int(total_size * 0.1)
+        if val_len < 0:
+            raise Exception(
+                "The validation size is less than 0. Fix your train and test percentages!"
+            )
 
-        # Train, Val, Test Bölülmesi
-        train_data = data_list[:train_size]
-        val_data = data_list[train_size:train_size + val_size]
-        test_data = data_list[train_size + val_size:]
+        # 3. Listelerin Kesilmesi (Slicing) - Her zaman geçmişten geleceğe doğru
+        # Train (ilk kısım)
+        self.train_dataloader = DataLoader(
+            data_list[:train_len],
+            batch_size=batch_size,
+            shuffle=False,
+        )
 
-        train_loader = DataLoader(train_data, batch_size=self.batch_size, shuffle=False)
-        val_loader = DataLoader(val_data, batch_size=self.batch_size, shuffle=False)
-        test_loader = DataLoader(test_data, batch_size=self.batch_size, shuffle=False)
+        # Eğer validation 0 ise, kalan tüm son veriler doğrudan Test'e gider
+        if val_len == 0:
+            self.test_dataloader = DataLoader(
+                data_list[train_len:],
+                batch_size=batch_size,
+                shuffle=False,
+            )
 
-        print("✅ Data preparation successful.")
-        print(f"Train samples: {len(train_data)}")
-        print(f"Validation samples: {len(val_data)}")
-        print(f"Test samples: {len(test_data)}")
+        # Eğer validation varsa, aradaki kısmı Val'e, en son güncel kısmı Test'e atarız
+        else:
+            val_end_index = train_len + val_len
+            self.val_dataloader = DataLoader(
+                data_list[train_len:val_end_index],
+                batch_size=batch_size,
+                shuffle=False,
+            )
+            self.test_dataloader = DataLoader(
+                data_list[val_end_index:],
+                batch_size=batch_size,
+                shuffle=False,
+            )
 
-        return train_loader, val_loader, test_loader
+        # En nihayetinde fonksiyon bu 3 loader'ı döndürmeli
+        return self.train_dataloader, self.val_dataloader, self.test_dataloader
 
-    def fit(self, train_loader, val_loader, optimizer, loss_fn, epochs=20):
+    def train(self, loss_func, optimizer, epochs, learning_rate=1e-4):
         print(f"Starting Training on {self.device} for {epochs} epochs...")
-        history = {"train_loss": [], "val_loss": []}
+
+        # Phase 3: Learning Rate Scheduler
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=2
+        )
+
         for epoch in range(epochs):
             self.model.train()
             train_loss = 0.0
 
-            for batch in train_loader:
+            for batch in self.train_dataloader:
                 batch = batch.to(self.device)
                 optimizer.zero_grad()
 
-                # Forward Pass
-                output = self.model(batch.x, batch.edge_index, batch.edge_attr)
+                # TSFM Forward Pass (tüm özellikleri yolluyoruz)
+                preds = self.model(
+                    e_i=batch.e_i,
+                    x=batch.x,
+                    edge_index=batch.edge_index,
+                    edge_weight=batch.edge_attr,
+                    target_idx=batch.target_idx,
+                    batch_ptr=batch.ptr,
+                )
 
-                # Extract predictions belonging to target_col
-                # batch.ptr stores the start index of every graph in the batch
-                # batch.target_idx stores the node index of the target inside each local graph
-                target_indices = batch.ptr[:-1] + batch.target_idx.flatten()
-                target_preds = output[target_indices]
-
-                # Calculate loss
-                loss = loss_fn(target_preds, batch.y.view(-1, 1))
+                # Loss (Tahmin ile Hedefi Kıyaslama)
+                loss = loss_func(preds, batch.y.view(-1, 1))
                 loss.backward()
                 optimizer.step()
 
                 train_loss += loss.item() * batch.num_graphs
 
-            train_loss /= len(train_loader.dataset)
+            train_loss /= len(self.train_dataloader.dataset)
 
-            # Validation
-            self.model.eval()
+            # Validation Step
             val_loss = 0.0
-            with torch.no_grad():
-                for batch in val_loader:
-                    batch = batch.to(self.device)
-
-                    output = self.model(batch.x, batch.edge_index, batch.edge_attr)
-                    target_indices = batch.ptr[:-1] + batch.target_idx.flatten()
-                    target_preds = output[target_indices]
-
-                    loss = loss_fn(target_preds, batch.y.view(-1, 1))
-                    val_loss += loss.item() * batch.num_graphs
-
-            val_loss /= len(val_loader.dataset)
-
-            print(
-                f"Epoch {epoch + 1}/{epochs} | Train Loss: {train_loss:.4f} | Validation Loss: {val_loss:.4f}"
-            )
-            history["train_loss"].append(train_loss)
-            history["val_loss"].append(val_loss)
+            if self.val_dataloader is not None:
+                self.model.eval()
+                with torch.no_grad():
+                    for batch in self.val_dataloader:
+                        batch = batch.to(self.device)
+                        preds = self.model(
+                            e_i=batch.e_i,
+                            x=batch.x,
+                            edge_index=batch.edge_index,
+                            edge_weight=batch.edge_attr,
+                            target_idx=batch.target_idx,
+                            batch_ptr=batch.ptr,
+                        )
+                        loss = loss_func(preds, batch.y.view(-1, 1))
+                        val_loss += loss.item() * batch.num_graphs
+                val_loss /= len(self.val_dataloader.dataset)
+                print(
+                    f"Epoch {epoch + 1}/{epochs} | Train Loss: {train_loss:.4f} | Validation Loss: {val_loss:.4f}"
+                )
+                scheduler.step(val_loss)
+            else:
+                print(f"Epoch {epoch + 1}/{epochs} | Train Loss: {train_loss:.4f}")
+                scheduler.step(train_loss)
 
         print("Training Completed!")
-        return history

@@ -11,6 +11,9 @@ sys.path.insert(0, '/Users/tugan_basaran/Desktop/Lessons/CS.401/Kodlar/Moirai')
 from utils.TSFMTrainer import TSFMTrainer
 from TSFM import TSFM
 
+torch.manual_seed(42)
+
+
 def calculate_regression_metrics(y_true, y_pred):
     mse = np.mean((y_true - y_pred)**2)
     rmse = np.sqrt(mse)
@@ -77,30 +80,10 @@ def main():
     data_path = '/Users/tugan_basaran/Desktop/Lessons/CS.401/Kodlar/Moirai/uni2ts/data/commodity_prices.csv'
     
     try:
-        raw_emb_dict = torch.load(emb_path, map_location='cpu', weights_only=False)
+        embedding_dict = torch.load(emb_path, map_location='cpu', weights_only=False)
     except Exception as e:
         print(f"Error loading {emb_path}: {e}")
         return
-
-    # Map Bloomberg tickers to Yahoo Finance tickers
-    ticker_map = {
-        'CO1 Comdty': 'BZ=F',
-        'CL1 Comdty': 'CL=F',
-        'GC1 Comdty': 'GC=F',
-        'HG1 Comdty': 'HG=F',
-        'HO1 Comdty': 'HO=F',
-        'NG1 Comdty': 'NG=F',
-        'PA1 Comdty': 'PA=F',
-        'PL1 Comdty': 'PL=F',
-        'SI1 Comdty': 'SI=F',
-        'C 1 Comdty': 'ZC=F'
-    }
-
-    print("Mapping embedding keys to target columns...")
-    embedding_dict = {}
-    for date, emb_map in raw_emb_dict.items():
-        new_map = {ticker_map.get(k, k): v for k, v in emb_map.items()}
-        embedding_dict[date] = new_map
 
     print("Initializing TSFMTrainer...")
     device = "mps" if torch.backends.mps.is_available() else "cpu"
@@ -108,10 +91,11 @@ def main():
     
     trainer = TSFMTrainer(device=device)
 
-    print("Preparing data for BZ=F target...")
+    
     # seq_len=32 is derived as context_length // patch_len
     # 512 // 16 = 32
-    target_col = "BZ=F"
+    target_col = "CO1_Commodity"
+    print(f"Preparing data for {target_col} target...")
     train_loader, val_loader, test_loader = trainer.prepare_data(
         embedding_dict=embedding_dict,
         data_path=data_path,

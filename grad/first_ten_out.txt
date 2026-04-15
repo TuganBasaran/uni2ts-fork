@@ -1,0 +1,43 @@
+/Users/tugan_basaran/Desktop/Lessons/CS.401/Kodlar/Moirai/venv/lib/python3.11/site-packages/pandas/core/internals/blocks.py:366: RuntimeWarning: invalid value encountered in log
+  result = func(self.values, **kwargs)
+Loading Moirai Embeddings...
+Initializing TSFMTrainer...
+Using device: mps
+Preparing data for CO1 Comdty target...
+✅ Data preparation successful.
+Train samples: 6069
+Test samples: 1518
+Starting Training...
+Starting Training on mps for 15 epochs...
+Epoch 1/15 | Train Loss: 2.5266 | Validation Loss: 0.3123
+Epoch 2/15 | Train Loss: 1.0126 | Validation Loss: 0.3183
+Epoch 3/15 | Train Loss: 1.0124 | Validation Loss: 0.3244
+Epoch 4/15 | Train Loss: 1.0119 | Validation Loss: 0.3301
+Epoch 5/15 | Train Loss: 1.0116 | Validation Loss: 0.3353
+Epoch 6/15 | Train Loss: 1.0113 | Validation Loss: 0.3399
+Epoch 7/15 | Train Loss: 1.0112 | Validation Loss: 0.3438
+Epoch 8/15 | Train Loss: 1.0111 | Validation Loss: 0.3472
+Epoch 9/15 | Train Loss: 1.0111 | Validation Loss: 0.3501
+Epoch 10/15 | Train Loss: 1.0111 | Validation Loss: 0.3525
+Epoch 11/15 | Train Loss: 1.0111 | Validation Loss: 0.3546
+Epoch 12/15 | Train Loss: 1.0111 | Validation Loss: 0.3563
+Epoch 13/15 | Train Loss: 1.0111 | Validation Loss: 0.3578
+Epoch 14/15 | Train Loss: 1.0112 | Validation Loss: 0.3590
+Epoch 15/15 | Train Loss: 1.0112 | Validation Loss: 0.3600
+Training Completed!
+Evaluating on Test Set...
+
+--- Regression Metrics on Test Data ---
+MSE: 230.9497
+RMSE: 15.1970
+MAE: 10.8126
+R2: -0.5421
+
+--- Financial Metrics on Test Data ---
+Hit Ratio: 0.3626
+Strategy Cumulative Return: 187.86%
+Buy & Hold Return: 11.20%
+Sharpe Ratio: 0.7561
+Max Drawdown: -0.4597
+
+✅ Real test suite completed successfully on first_ten_columns!

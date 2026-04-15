@@ -61,42 +61,40 @@ class TSFM(nn.Module):
             corr_period=self.corr_period,
         )
 
-        flat_dim = self.seq_len * 384
-
         self.graph_module = GraphModule(
-            input_dim=flat_dim, hidden_dim=128
+            input_dim=10,
+            hidden_dim=256,  # input dim = column sayısı
         ).to(self.device)
 
-        self.adapter = Adapter(
-            embedding_dim=flat_dim, hidden_dim=128
-        ).to(self.device)
+        self.adapter = Adapter(embedding_dim=12288, hidden_dim=256).to(self.device)
 
         self.PredictionHead = PredictionHead(
-            input_dim=flat_dim,
+            input_dim=512,  # 256 from Graph + 256 from Moirai
             hidden_dim=128,
             forecast_horizon=self.forecast_horizon,
         ).to(self.device)
 
         self.graph_dict = self.spatio_graph.get_pyg_edges(threshold=threshold)
 
-    def forward(self, e_i, edge_index, edge_weight):
+    def forward(self, e_i, x, edge_index, edge_weight, target_idx, batch_ptr):
         """
-
-        Forwards the embeddings with correlation edge_index's and edge weights
-
-        Args:
-            embedding (torch.tensor):
-            This is the embedding that is going to be passed.
-            The shapes of the layers can be adjusted to the embedding's shape.
-
-            For example:
-            Moirai Embedding Shape: [32, 384]
+        Forwards the embeddings with correlation edge_index's and edge weights.
         """
+        # GraphModule tüm node'ları (11 adet) işler
+        h_i_all = self.graph_module(x, edge_index, edge_weight)
 
-        h_i = self.graph_module(e_i, edge_index, edge_weight)
+        # PyG batch içinden sadece hedefin (target) indekslerini buluyoruz
+        target_indices = batch_ptr[:-1] + target_idx.flatten()
 
-        e_i_2 = self.adapter(e_i, h_i)  # Toplama işlemi kendi içerisinde kullanıyor
+        # Sadece hedefe ait olan h_i satırlarını çekiyoruz
+        h_i_target = h_i_all[target_indices]
 
-        pred = self.PredictionHead(e_i_2)
+        # Moirai embedding'i 256'ya sıkıştırıyoruz
+        e_i_projected = self.adapter(e_i)
+
+        # Grafiğin 256'lık çıktısı ve Moirai'nin 256'lık çıktısını birleştiriyoruz
+        x_concat = torch.cat([e_i_projected, h_i_target], dim=-1)
+
+        pred = self.PredictionHead(x_concat)
 
         return pred
