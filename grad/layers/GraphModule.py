@@ -5,7 +5,7 @@ import torch_geometric.nn as pyg_nn  # type: ignore
 
 
 class GraphModule(nn.Module):
-    def __init__(self, input_dim: int = 11 , hidden_dim: int = 384, device="cpu"):
+    def __init__(self, input_dim: int = 10, hidden_dim: int = 384, device="cpu"):
         super().__init__()
 
         # GCN neden kullandım? -> GCNConv olarak geçiyor.

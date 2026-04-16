@@ -6,6 +6,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import sys
 
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from utils.DirectionalLoss import DirectionalLoss
+
 sys.path.insert(0, "/Users/tugan_basaran/Desktop/Lessons/CS.401/Kodlar/Moirai")
 
 # Custom modules
@@ -14,43 +17,63 @@ from TSFM import TSFM
 
 
 def calculate_regression_metrics(y_true, y_pred):
-    mse = np.mean((y_true - y_pred) ** 2)
+    """
+    Scikit-learn tabanlı regresyon metrikleri.
+    y_true ve y_pred: log-return dizileri.
+    """
+    mse = mean_squared_error(y_true, y_pred)
     rmse = np.sqrt(mse)
-    mae = np.mean(np.abs(y_true - y_pred))
+    mae = mean_absolute_error(y_true, y_pred)
+    r2 = r2_score(y_true, y_pred)
 
-    ss_res = np.sum((y_true - y_pred) ** 2)
-    ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
-    r2 = 1 - (ss_res / ss_tot)
-
-    mape = np.mean(np.abs((y_true - y_pred) / (y_true + 1e-8))) * 100
+    # MAPE: log-return'ler sıfıra çok yakın olduğu için
+    # sıfıra bölme riski var. Bunun yerine sadece sıfır olmayan
+    # gerçek değerler üzerinden hesaplıyoruz.
+    nonzero_mask = np.abs(y_true) > 1e-8
+    if nonzero_mask.sum() > 0:
+        mape = np.mean(np.abs((y_true[nonzero_mask] - y_pred[nonzero_mask]) / y_true[nonzero_mask])) * 100
+    else:
+        mape = float("inf")
 
     return {"MSE": mse, "RMSE": rmse, "MAE": mae, "MAPE": mape, "R2": r2}
 
 
-def calculate_financial_metrics(y_true, y_pred):
-    price_t = y_true[:-1]
-    price_t1_true = y_true[1:]
-    price_t1_pred = y_pred[1:]
+def calculate_financial_metrics(y_true_returns, y_pred_returns):
+    """
+    Finansal metrikler.
+    y_true_returns ve y_pred_returns: log-return dizileri (günlük).
 
-    actual_dir = np.sign(price_t1_true - price_t)
-    pred_dir = np.sign(price_t1_pred - price_t)
-
+    Log-return'lerde yön tahmini:
+      - y_true > 0  => fiyat yükseldi
+      - y_true < 0  => fiyat düştü
+    Strateji: tahmin edilen yöne göre long/short pozisyon aç.
+    """
+    # Yön tahmini (Direction prediction)
+    actual_dir = np.sign(y_true_returns)
+    pred_dir = np.sign(y_pred_returns)
     hit_ratio = np.mean(actual_dir == pred_dir)
 
-    actual_returns = (price_t1_true - price_t) / price_t
-    strat_returns = pred_dir * actual_returns
+    # Log-return'leri basit return'e çevir: r = exp(log_r) - 1
+    actual_simple_returns = np.exp(y_true_returns) - 1
+    pred_simple_dir = np.sign(y_pred_returns)  # Yön bilgisi log-return'den
 
-    cum_strat_returns = np.cumprod(1 + strat_returns)
-    cum_bh_returns = np.cumprod(1 + actual_returns)
+    # Strateji: Tahmin yönüne göre long (+1) veya short (-1)
+    strat_returns = pred_simple_dir * actual_simple_returns
 
-    total_strat_ret = cum_strat_returns[-1] - 1
-    total_bh_ret = cum_bh_returns[-1] - 1
+    # Kümülatif getiri
+    cum_strat = np.cumprod(1 + strat_returns)
+    cum_bh = np.cumprod(1 + actual_simple_returns)
 
+    total_strat_ret = cum_strat[-1] - 1
+    total_bh_ret = cum_bh[-1] - 1
+
+    # Sharpe Ratio (252 işlem günü üzerinden yıllıklandırılmış)
     mean_ret = np.mean(strat_returns)
     std_ret = np.std(strat_returns)
-    sharpe = np.sqrt(252) * (mean_ret / std_ret) if std_ret > 0 else 0
+    sharpe = np.sqrt(252) * (mean_ret / std_ret) if std_ret > 0 else 0.0
 
-    drawdowns = cum_strat_returns / np.maximum.accumulate(cum_strat_returns) - 1
+    # Max Drawdown
+    drawdowns = cum_strat / np.maximum.accumulate(cum_strat) - 1
     max_dd = np.min(drawdowns)
 
     return {
@@ -62,9 +85,10 @@ def calculate_financial_metrics(y_true, y_pred):
     }
 
 
+
 def main():
     print("Loading Moirai Embeddings...")
-    emb_path = "/Users/tugan_basaran/Desktop/Lessons/CS.401/Kodlar/Moirai/uni2ts/Embeddings/ten_comdty_embeddings.pt"
+    emb_path = "/Users/tugan_basaran/Desktop/Lessons/CS.401/Kodlar/Moirai/uni2ts/Embeddings/moirai_1_embeddings.pt"
     data_path = "/Users/tugan_basaran/Desktop/Lessons/CS.401/Kodlar/Moirai/uni2ts/data/first_ten_columns.csv"
 
     try:
@@ -73,8 +97,6 @@ def main():
         print(f"Error loading {emb_path}: {e}")
         return
 
-    # In this new dataset, column names match the embedding keys natively (CO1 Comdty, CL1 Comdty, etc.)
-    # No need to map to Yahoo Tickers (BZ=F).
     embedding_dict = raw_emb_dict
 
     print("Initializing TSFMTrainer...")
@@ -84,6 +106,8 @@ def main():
     trainer = TSFMTrainer(device=device)
 
     print("Preparing data for CO1 Comdty target...")
+
+
     target_col = "CO1 Comdty"
     train_loader, val_loader, test_loader = trainer.prepare_data(
         embedding_dict=embedding_dict,
@@ -93,20 +117,21 @@ def main():
         batch_size=32,
     )
 
-    optimizer = torch.optim.Adam(trainer.model.parameters(), lr=1e-3)
-    loss_fn = nn.HuberLoss()  # More robust to outliers in price movements
-
+    
+    optimizer = torch.optim.Adam
+    loss_fn = nn.MSELoss()
+    
     print("Starting Training...")
-    epochs = 15
+    EPOCHS= 100
     trainer.train(
-        loss_func=loss_fn, optimizer=optimizer, epochs=epochs, learning_rate=1e-3
+        loss_func=loss_fn, optimizer=optimizer, epochs=EPOCHS, learning_rate= 1e-4
     )
 
+    # ─── Evaluation ───
     print("Evaluating on Test Set...")
     trainer.model.eval()
     y_true_list = []
     y_pred_list = []
-    price_t_list = []
 
     with torch.no_grad():
         for batch in test_loader:
@@ -115,7 +140,7 @@ def main():
 
             preds = trainer.model(
                 e_i=batch.e_i,
-                x=batch.x,
+                node_feature=batch.x,
                 edge_index=batch.edge_index,
                 edge_weight=batch.edge_attr,
                 target_idx=batch.target_idx,
@@ -123,27 +148,18 @@ def main():
             )
 
             y_true_list.extend(targets.cpu().numpy())
-            y_pred_list.extend(preds.cpu().numpy())
-            price_t_list.extend(batch.price_t.cpu().numpy())
+            y_pred_list.extend(preds.squeeze().cpu().numpy())
 
-    y_true_ret = np.array(y_true_list).reshape(-1, 1)
-    y_pred_ret = np.array(y_pred_list).reshape(-1, 1)
-    price_t = np.array(price_t_list).flatten()
+    y_true = np.array(y_true_list).flatten()
+    y_pred = np.array(y_pred_list).flatten()
 
-    # Inverse transform to get actual raw percentage returns
-    y_true_ret = trainer.target_scaler.inverse_transform(y_true_ret).flatten()
-    y_pred_ret = trainer.target_scaler.inverse_transform(y_pred_ret).flatten()
-
-    # Reconstruct the Absolute Target Prices!
-    # Price_{t+1} = Price_t * (1 + Return_{t->t+1})
-    y_true = price_t * (1 + y_true_ret)
-    y_pred = price_t * (1 + y_pred_ret)
-
-    print("\n--- Regression Metrics on Test Data ---")
+    # ─── Regression Metrics (Log-Return uzayında) ───
+    print("\n--- Regression Metrics on Test Data (Log-Return Space) ---")
     reg_metrics = calculate_regression_metrics(y_true, y_pred)
     for k, v in reg_metrics.items():
-        print(f"{k}: {v:,.4f}")
+        print(f"{k}: {v:,.6f}")
 
+    # ─── Financial Metrics ───
     print("\n--- Financial Metrics on Test Data ---")
     fin_metrics = calculate_financial_metrics(y_true, y_pred)
     for k, v in fin_metrics.items():
@@ -151,8 +167,13 @@ def main():
             print(f"{k}: {v:,.4f}")
         else:
             print(f"{k}: {v:,.2%}")
+            
+    print(f"İlk 10 tahmin: {y_pred[:10]}")
+    print(f"İlk 10 gerçek:  {y_true[:10]}")
+    print(f"Tahmin std:     {y_pred.std():.6f}")
+    print(f"Gerçek std:     {y_true.std():.6f}")
 
-    print("\n✅ Real test suite completed successfully on first_ten_columns!")
+    print(f"\n✅ Test completed! ({len(y_true)} samples evaluated)")
 
 
 if __name__ == "__main__":

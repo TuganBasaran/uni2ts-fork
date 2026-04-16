@@ -11,7 +11,6 @@ from torch_geometric.loader import DataLoader  # type: ignore
 # Add the 'grad' directory to the python path so it can find TSFM.py
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from sklearn.preprocessing import StandardScaler
 from TSFM import TSFM  # type: ignore
 
 
@@ -38,14 +37,17 @@ class TSFMTrainer:
         self.target_column = target_column
         self.embedding_dict = embedding_dict
         self.dict_keys_list = list(self.embedding_dict.keys())
-        self.embedding_shape = self.embedding_dict[self.dict_keys_list[0]]
+
+        # S01: Dinamik boyut tespiti
+        sample_dict = self.embedding_dict[self.dict_keys_list[0]]
+        sample_tensor = list(sample_dict.values())[
+            0
+        ]  # İlk tarihteki ilk sütunun embedding'i
 
         if patch_len is None:
             self.patch_len = 32
         else:
-            self.patch_len = self.embedding_shape[
-                0
-            ]  # (patch_len, sequence_len) -> (patch_len)
+            self.patch_len = sample_tensor.shape[0]
 
         self.model = TSFM(
             data_path=self.data_path,
@@ -56,40 +58,42 @@ class TSFMTrainer:
             threshold=0.3,
             device=self.device,
             forecast_horizon=1,
+            embedding_dim=sample_tensor.flatten().shape[0],
         )
 
         self.corr_dict = self.model.graph_dict
 
         self.corr_dates = np.array(list(self.corr_dict.keys()))
         self.dict_dates = np.array(list(self.embedding_dict.keys()))
-        self.shifted_df = self.df.shift(-1).dropna().copy()
-        self.returns_df = ((self.shifted_df - self.df) / self.df).dropna().copy()
-        self.shifted_dates = np.array(list(self.shifted_df.index))
+        # self.shifted_df = self.df.shift(-1).dropna().copy()
+        # 1. Log-return hesapla
+        self.log_returns = np.log(self.df / self.df.shift(1))
+        # 2. inf'leri at
+        self.log_returns = self.log_returns.replace([np.inf, -np.inf], np.nan).dropna()
+        # 3. Sıfır satırları at
+        non_zero_mask = (self.log_returns != 0).any(axis=1)
+        self.log_returns = self.log_returns[non_zero_mask]
+        # 4. Clip
+        self.log_returns = self.log_returns.clip(lower=-0.10, upper=0.10)
+
+        # 5. ŞIMDI target_returns'ü temizlenmiş log_returns'ten türet
+        self.target_returns = self.log_returns.shift(-1).dropna()
+        self.target_dates = np.array(list(self.target_returns.index))
 
         self.valid_dates = np.intersect1d(self.corr_dates, self.dict_dates)
-        self.valid_dates = np.intersect1d(self.valid_dates, self.shifted_dates)
+        self.valid_dates = np.intersect1d(self.valid_dates, self.target_dates)
 
         self.valid_df = self.df.loc[self.valid_dates]
+
+        self.col_order = self.df.columns.tolist()
+        self.target_node_idx = self.col_order.index(self.target_column)
 
         data_list = []
 
         print(f"Preparing dataloaders with target column {self.target_column}")
 
-        # Calculate the node index of target column
-        col_order = self.df.columns.tolist()
-        target_node_idx = col_order.index(self.target_column)
-
         total_length = len(self.valid_dates)
         train_len = int(total_length * train_size)
-
-        # Fit scaler ONLY on the training portion to prevent data leakage
-        train_dates = self.valid_dates[:train_len]
-        # Target is now the percentage RETURN, not the absolute price!
-        train_y_returns = self.returns_df.loc[
-            train_dates, self.target_column
-        ].values.reshape(-1, 1)
-        self.target_scaler = StandardScaler()
-        self.target_scaler.fit(train_y_returns)
 
         for date in self.valid_dates:
             e_i = self.embedding_dict[date][self.target_column]
@@ -97,17 +101,22 @@ class TSFMTrainer:
             e_i = torch.tensor(e_i, dtype=torch.float32).flatten().unsqueeze(0)
 
             node_feature = self.corr_dict[date]["node_features"]
+
             edge_index = self.corr_dict[date]["edge_index"]
+
             edge_weight = self.corr_dict[date]["edge_weight"]
 
-            # Scale Returns!
-            y_return_raw = self.returns_df.loc[date, self.target_column]
-            y_scaled = self.target_scaler.transform([[y_return_raw]])[0][0]
-            y = torch.tensor(y_scaled, dtype=torch.float32)
-
-            # Keep track of the current day price (t) to reconstruct predictions at evaluation
-            price_t = self.df.loc[date, self.target_column]
-            price_t_tensor = torch.tensor(price_t, dtype=torch.float32)
+            y = torch.tensor(
+                [self.target_returns.loc[date, self.target_column]], dtype=torch.float32
+            )
+            
+            # NaN/inf kontrolü — temiz olmayan günleri atla
+            if torch.isnan(e_i).any() or torch.isinf(e_i).any():
+                continue
+            if torch.isnan(node_feature).any() or torch.isinf(node_feature).any():
+                continue
+            if torch.isnan(y) or torch.isinf(y):
+                continue
 
             data = Data(
                 x=node_feature,
@@ -115,8 +124,7 @@ class TSFMTrainer:
                 edge_attr=edge_weight,
                 e_i=e_i,
                 y=y,
-                price_t=price_t_tensor,
-                target_idx=torch.tensor([target_node_idx], dtype=torch.long),
+                target_idx=torch.tensor([self.target_node_idx], dtype=torch.long),
             )
 
             data_list.append(data)
@@ -180,11 +188,13 @@ class TSFMTrainer:
     def train(self, loss_func, optimizer, epochs, learning_rate=1e-4):
         print(f"Starting Training on {self.device} for {epochs} epochs...")
 
-        # Phase 3: Learning Rate Scheduler
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", factor=0.5, patience=2
-        )
-
+        # # Phase 3: Learning Rate Scheduler
+        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        #     optimizer, mode="min", factor=0.5, patience=2
+        # )  DAHA SONRA
+        
+        optimizer = optimizer(self.model.parameters(), lr= learning_rate)
+        
         for epoch in range(epochs):
             self.model.train()
             train_loss = 0.0
@@ -196,7 +206,7 @@ class TSFMTrainer:
                 # TSFM Forward Pass (tüm özellikleri yolluyoruz)
                 preds = self.model(
                     e_i=batch.e_i,
-                    x=batch.x,
+                    node_feature=batch.x,
                     edge_index=batch.edge_index,
                     edge_weight=batch.edge_attr,
                     target_idx=batch.target_idx,
@@ -206,6 +216,7 @@ class TSFMTrainer:
                 # Loss (Tahmin ile Hedefi Kıyaslama)
                 loss = loss_func(preds, batch.y.view(-1, 1))
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.1)
                 optimizer.step()
 
                 train_loss += loss.item() * batch.num_graphs
@@ -221,7 +232,7 @@ class TSFMTrainer:
                         batch = batch.to(self.device)
                         preds = self.model(
                             e_i=batch.e_i,
-                            x=batch.x,
+                            node_feature=batch.x,
                             edge_index=batch.edge_index,
                             edge_weight=batch.edge_attr,
                             target_idx=batch.target_idx,
@@ -233,9 +244,9 @@ class TSFMTrainer:
                 print(
                     f"Epoch {epoch + 1}/{epochs} | Train Loss: {train_loss:.4f} | Validation Loss: {val_loss:.4f}"
                 )
-                scheduler.step(val_loss)
+                # scheduler.step(val_loss)
             else:
                 print(f"Epoch {epoch + 1}/{epochs} | Train Loss: {train_loss:.4f}")
-                scheduler.step(train_loss)
+                # scheduler.step(train_loss)
 
         print("Training Completed!")

@@ -17,6 +17,8 @@ class TSFM(nn.Module):
         threshold=0.3,
         device="cpu",
         forecast_horizon=1,
+        num_columns=10,
+        embedding_dim=12288,
     ):
 
         super().__init__()
@@ -32,13 +34,12 @@ class TSFM(nn.Module):
 
         if device == "cuda" and torch.cuda.is_available():
             self.device = "cuda"
-            torch.set_default_dtype(torch.long)
         elif device == "mps" and torch.backends.mps.is_available():
-            self.device == "mps"
-            torch.set_default_dtype(torch.float32)
+            self.device = "mps"
         else:
             self.device = "cpu"
-            torch.set_default_dtype(torch.long)
+
+        torch.set_default_dtype(torch.float32)
 
         # Bunları parametre olarak vermeyi tercih ettim. Generalization bakış açısından bakarak bunu yapıyorum
         # İleriki zamana göre bu kısmı aktif etmek gerekebilir.
@@ -62,39 +63,38 @@ class TSFM(nn.Module):
         )
 
         self.graph_module = GraphModule(
-            input_dim=10,
+            input_dim=5,
             hidden_dim=256,  # input dim = column sayısı
         ).to(self.device)
 
-        self.adapter = Adapter(embedding_dim=12288, hidden_dim=256).to(self.device)
+        self.adapter = Adapter(embedding_dim=embedding_dim, graph_dim=256).to(
+            self.device
+        )
 
         self.PredictionHead = PredictionHead(
-            input_dim=512,  # 256 from Graph + 256 from Moirai
+            input_dim=256,
             hidden_dim=128,
             forecast_horizon=self.forecast_horizon,
         ).to(self.device)
 
         self.graph_dict = self.spatio_graph.get_pyg_edges(threshold=threshold)
 
-    def forward(self, e_i, x, edge_index, edge_weight, target_idx, batch_ptr):
-        """
-        Forwards the embeddings with correlation edge_index's and edge weights.
-        """
-        # GraphModule tüm node'ları (11 adet) işler
-        h_i_all = self.graph_module(x, edge_index, edge_weight)
+    def forward(self, e_i, node_feature, edge_index, edge_weight, batch_ptr, target_idx):
+        # 1. GNN
+        h_i = self.graph_module(node_feature, edge_index, edge_weight)
 
-        # PyG batch içinden sadece hedefin (target) indekslerini buluyoruz
-        target_indices = batch_ptr[:-1] + target_idx.flatten()
+        # 2. Target node'u ayıkla
+        batch_size = batch_ptr.size(0) - 1
+        target_nodes = []
+        for i in range(batch_size):
+            start = batch_ptr[i]
+            local_target = target_idx[i].item()
+            target_nodes.append(h_i[start + local_target])
+        target_h_i = torch.stack(target_nodes)
 
-        # Sadece hedefe ait olan h_i satırlarını çekiyoruz
-        h_i_target = h_i_all[target_indices]
+        # 3. Adapter: fusion + residual
+        enriched = self.adapter(e_i, target_h_i)
 
-        # Moirai embedding'i 256'ya sıkıştırıyoruz
-        e_i_projected = self.adapter(e_i)
-
-        # Grafiğin 256'lık çıktısı ve Moirai'nin 256'lık çıktısını birleştiriyoruz
-        x_concat = torch.cat([e_i_projected, h_i_target], dim=-1)
-
-        pred = self.PredictionHead(x_concat)
-
+        # 4. Prediction
+        pred = self.PredictionHead(enriched)
         return pred
